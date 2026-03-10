@@ -3655,7 +3655,9 @@ def trtllm_batch_context_with_kv_cache(
     enable_pdl: Optional[bool] = None,
     sinks: Optional[List[torch.Tensor]] = None,
     skip_softmax_threshold_scale_factor: Optional[float] = None,
-) -> Union[torch.Tensor, FP4Tensor]:
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
+) -> Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]:
     """
     Parameters
     ----------
@@ -3713,10 +3715,21 @@ def trtllm_batch_context_with_kv_cache(
         If no value is provided, then standard attention is used.
         Setting the threshold to a higher value generally increases kernel performance at the cost of accuracy degradation.
         The actual threshold value equals the provided threshold_scale_factor divided by the context length.
+
+    return_lse : bool = False
+        Whether to return Log-Sum-Exp (LSE) values.
+
+    lse : Optional[torch.Tensor] = None
+        LSE tensor to write into. If not provided and return_lse is True, a new tensor will be allocated.
+        Shape should be ``[num_tokens, num_heads]``, dtype: ``torch.float32``.
+
     Returns
     -------
-    out: Union[torch.Tensor, FP4Tensor]
-        output torch.Tensor or FP4Tensor.
+    out: Union[torch.Tensor, FP4Tensor, Tuple[Union[torch.Tensor, FP4Tensor], torch.Tensor]]
+        If :attr:`return_lse` is ``False``, the attention output (torch.Tensor or FP4Tensor).
+        If :attr:`return_lse` is ``True``, a tuple of two tensors:
+        - The attention output (torch.Tensor or FP4Tensor)
+        - The LSE tensor (torch.Tensor with dtype float32)
     """
 
     if enable_pdl is None:
@@ -3822,6 +3835,13 @@ def trtllm_batch_context_with_kv_cache(
     if isinstance(bmm2_scale, torch.Tensor):
         assert bmm2_scale.dtype == torch.float32
     workspace_size = workspace_buffer.numel() * workspace_buffer.element_size()
+
+    # Allocate LSE tensor if return_lse is True and lse is not provided
+    if return_lse and lse is None:
+        lse = torch.empty(
+            query.shape[0], query.shape[1], device=query.device, dtype=torch.float32
+        )
+
     run_func(
         out,
         out_scale_factor,
@@ -3847,12 +3867,14 @@ def trtllm_batch_context_with_kv_cache(
         workspace_size,
         sinks,
         skip_softmax_threshold_scale_factor,
+        lse if return_lse else None,
     )
-    return (
+    out_tensor = (
         out
         if out_dtype != "nvfp4"
         else FP4Tensor(out, out_scale_factor, o_sf_start_index, query.shape)
     )
+    return (out_tensor, lse) if return_lse else out_tensor
 
 
 @functools.cache

@@ -603,7 +603,9 @@ def trtllm_batch_decode_with_kv_cache_mla(
     skip_softmax_threshold_scale_factor: Optional[float] = None,
     enable_pdl: bool | None = None,
     backend: str = "auto",
-) -> torch.Tensor:
+    return_lse: bool = False,
+    lse: Optional[torch.Tensor] = None,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
     Parameters
     ----------
@@ -633,6 +635,22 @@ def trtllm_batch_decode_with_kv_cache_mla(
         When set to ``auto``, the backend will be chosen based on the device architecture and kernel availability.
         For sm_100 and sm_103 (blackwell architecture), ``auto`` will choose ``trtllm-gen`` backend.
         For sm_120 (blackwell architecture), ``auto`` will choose ``xqa`` backend.
+
+    return_lse : bool = False
+        Whether to return Log-Sum-Exp (LSE) values.
+        Only supported by trtllm-gen backend. XQA backend does not support LSE return.
+
+    lse : Optional[torch.Tensor] = None
+        LSE tensor to write into. If not provided and return_lse is True, a new tensor will be allocated.
+        Shape should be ``[batch_size * q_len_per_request, num_heads]``, dtype: ``torch.float32``.
+
+    Returns
+    -------
+    out : Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
+        If :attr:`return_lse` is ``False``, the attention output tensor.
+        If :attr:`return_lse` is ``True``, a tuple of two tensors:
+        - The attention output tensor
+        - The LSE tensor (torch.Tensor with dtype float32)
 
     Note
     ----
@@ -679,6 +697,8 @@ def trtllm_batch_decode_with_kv_cache_mla(
             )
         if skip_softmax_threshold_scale_factor is not None:
             raise ValueError("skip_softmax is not supported for XQA backend")
+        if return_lse:
+            raise ValueError("XQA MLA backend does not support return_lse")
         return xqa_batch_decode_with_kv_cache_mla(
             query,
             kv_cache,
@@ -740,6 +760,13 @@ def trtllm_batch_decode_with_kv_cache_mla(
         max_q_len = query.size(1)
         query = query.flatten(0, 1)  # [B*S, H, D]
 
+        # Allocate LSE tensor if return_lse is True and lse is not provided
+        if return_lse and lse is None:
+            num_qo_heads = query.shape[1]
+            lse = torch.empty(
+                query.shape[0], num_qo_heads, device=query.device, dtype=torch.float32
+            )
+
         run_func(
             out,
             None,  # fp4 output not supported in wrapper api yet.
@@ -765,9 +792,10 @@ def trtllm_batch_decode_with_kv_cache_mla(
             sinks,
             None,  # cum_seq_lens_q
             skip_softmax_threshold_scale_factor,
+            lse if return_lse else None,
         )
 
-        return out
+        return (out, lse) if return_lse else out
     else:
         raise ValueError(f"Backend {backend} not supported")
 
